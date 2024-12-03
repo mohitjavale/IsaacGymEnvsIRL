@@ -29,7 +29,7 @@ env:
   terminationHeight: 0.8
 
   asset:
-    assetFileName: "mjcf/nv_humanoid_irl.xml"
+    assetFileName: "mjcf/nv_humanoid.xml"
 
   plane:
     staticFriction: 1.0

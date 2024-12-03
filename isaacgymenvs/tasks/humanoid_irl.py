@@ -32,6 +32,7 @@ import torch
 
 from isaacgym import gymtorch
 from isaacgym import gymapi
+from isaacgym import gymutil
 from isaacgymenvs.utils.torch_jit_utils import scale, unscale, quat_mul, quat_conjugate, quat_from_angle_axis, \
     to_torch, get_axis_params, torch_rand_float, tensor_clamp, compute_heading_and_up, compute_rot, normalize_angle
 
@@ -64,9 +65,7 @@ class HumanoidIRL(VecTask):
 
         self.max_episode_length = self.cfg["env"]["episodeLength"]
 
-        # self.cfg["env"]["numObservations"] = 108
-        # self.cfg["env"]["numActions"] = 21
-        self.cfg["env"]["numObservations"] = 108
+        self.cfg["env"]["numObservations"] = 108+3+3
         self.cfg["env"]["numActions"] = 21
 
         super().__init__(config=self.cfg, rl_device=rl_device, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless, virtual_screen_capture=virtual_screen_capture, force_render=force_render)
@@ -94,9 +93,6 @@ class HumanoidIRL(VecTask):
         self.initial_root_states = self.root_states.clone()
         self.initial_root_states[:, 7:13] = 0
 
-        _rb_states = self.gym.acquire_rigid_body_state_tensor(self.sim)
-        self.rb_states = gymtorch.wrap_tensor(_rb_states)
-
         # create some wrapper tensors for different slices
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]
@@ -120,6 +116,8 @@ class HumanoidIRL(VecTask):
         self.dt = self.cfg["sim"]["dt"]
         self.potentials = to_torch([-1000./self.dt], device=self.device).repeat(self.num_envs)
         self.prev_potentials = self.potentials.clone()
+
+        self.ball_targets = to_torch([1000, 0, 0], device=self.device).repeat((self.num_envs, 1))
 
     def create_sim(self):
         self.up_axis_idx = 2 # index of up axis: Y=1, Z=2
@@ -145,10 +143,10 @@ class HumanoidIRL(VecTask):
         upper = gymapi.Vec3(spacing, spacing, spacing)
 
         asset_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../assets')
-        asset_file = "mjcf/nv_humanoid_irl.xml"
+        asset_file = "mjcf/nv_humanoid.xml"
 
-        # if "asset" in self.cfg["env"]:
-        #     asset_file = self.cfg["env"]["asset"].get("assetFileName", asset_file)
+        if "asset" in self.cfg["env"]:
+            asset_file = self.cfg["env"]["asset"].get("assetFileName", asset_file)
 
         asset_path = os.path.join(asset_root, asset_file)
         asset_root = os.path.dirname(asset_path)
@@ -160,20 +158,6 @@ class HumanoidIRL(VecTask):
         # Note - DOF mode is set in the MJCF file and loaded by Isaac Gym
         asset_options.default_dof_drive_mode = gymapi.DOF_MODE_NONE
         humanoid_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
-
-        # ball
-        # asset_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../assets')
-        # asset_file = "mjcf/ball.xml"
-        # asset_path = os.path.join(asset_root, asset_file)
-        # asset_root = os.path.dirname(asset_path)
-        # asset_file = os.path.basename(asset_path)
-        # asset_options = gymapi.AssetOptions()
-        # asset_options.default_dof_drive_mode = gymapi.DOF_MODE_NONE
-        # ball_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
-        # ball_pose = gymapi.Transform()
-        # ball_pose.p = gymapi.Vec3(*get_axis_params(0.1, self.up_axis_idx))
-        # ball_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
-        # self.ball_handles = []
 
         # Note - for this asset we are loading the actuator info from the MJCF
         actuator_props = self.gym.get_asset_actuator_properties(humanoid_asset)
@@ -205,6 +189,31 @@ class HumanoidIRL(VecTask):
         self.dof_limits_lower = []
         self.dof_limits_upper = []
 
+        # ball asset
+        # ball_asset_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../assets')
+        # ball_asset_file = "mjcf/ball.xml"
+        # ball_asset_path = os.path.join(ball_asset_root, ball_asset_file)
+        # ball_asset_root = os.path.dirname(ball_asset_path)
+        # ball_asset_file = os.path.basename(ball_asset_path)
+        # ball_asset_options = gymapi.AssetOptions()
+        # ball_asset_options.angular_damping = 0.01
+        # ball_asset_options.max_angular_velocity = 100.0
+        # ball_asset_options.default_dof_drive_mode = gymapi.DOF_MODE_NONE
+        # ball_asset = self.gym.load_asset(self.sim, ball_asset_root, ball_asset_file, ball_asset_options)
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.density = 10.0
+        ball_asset = self.gym.create_sphere(self.sim, 0.1, asset_options)
+
+        ball_start_pose = gymapi.Transform()
+        ball_start_pose.p = gymapi.Vec3(0.5, 0.0, 0.1)
+        ball_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
+
+        self.ball_handles = []
+        self.humanoid_actor_idxs = []
+        self.ball_actor_idxs = []
+
+
         for i in range(self.num_envs):
             # create env instance
             env_ptr = self.gym.create_env(
@@ -220,12 +229,18 @@ class HumanoidIRL(VecTask):
 
             self.envs.append(env_ptr)
             self.humanoid_handles.append(handle)
+            self.humanoid_actor_idxs.append(self.gym.get_actor_index(env_ptr, handle, gymapi.DOMAIN_SIM))
 
-            # ball_handle = self.gym.create_actor(env_ptr, ball_asset, ball_pose, "ball", i, 0, 0)
-            # self.ball_handles.append(ball_handle)
+            # load ball
+            ball_handle = self.gym.create_actor(env_ptr, ball_asset, ball_start_pose, "ball", i, 0, 0)
+            self.ball_handles.append(ball_handle)
+            self.ball_actor_idxs.append(self.gym.get_actor_index(env_ptr, ball_handle, gymapi.DOMAIN_SIM))
+
+        self.humanoid_actor_idxs = torch.Tensor(self.humanoid_actor_idxs).to(device=self.device,dtype=torch.int32)
+        self.ball_actor_idxs = torch.Tensor(self.ball_actor_idxs).to(device=self.device,dtype=torch.int32)
+
 
         dof_prop = self.gym.get_actor_dof_properties(env_ptr, handle)
-        # import ipdb; ipdb.set_trace()
         for j in range(self.num_dof):
             if dof_prop['lower'][j] > dof_prop['upper'][j]:
                 self.dof_limits_lower.append(dof_prop['upper'][j])
@@ -256,26 +271,43 @@ class HumanoidIRL(VecTask):
             self.motor_efforts,
             self.termination_height,
             self.death_cost,
-            self.max_episode_length
+            self.max_episode_length,
+            self.root_states[self.humanoid_actor_idxs, :],
+            self.root_states[self.ball_actor_idxs, :]
         )
 
     def compute_observations(self):
         self.gym.refresh_dof_state_tensor(self.sim)
         self.gym.refresh_actor_root_state_tensor(self.sim)
+
         self.gym.refresh_force_sensor_tensor(self.sim)
+
         self.gym.refresh_dof_force_tensor(self.sim)
-        self.gym.refresh_rigid_body_state_tensor(self.sim)
+
+        # self.obs_buf[:], self.potentials[:], self.prev_potentials[:], self.up_vec[:], self.heading_vec[:] = compute_humanoid_observations(
+        #     self.obs_buf, self.root_states, self.targets, self.potentials,
+        #     self.inv_start_rot, self.dof_pos, self.dof_vel, self.dof_force_tensor,
+        #     self.dof_limits_lower, self.dof_limits_upper, self.dof_vel_scale,
+        #     self.vec_sensor_tensor, self.actions, self.dt, self.contact_force_scale, self.angular_velocity_scale,
+        #     self.basis_vec0, self.basis_vec1)
+
+        self.targets = self.ball_targets.clone()
+        self.targets[:,2] = 1.34
+
         self.obs_buf[:], self.potentials[:], self.prev_potentials[:], self.up_vec[:], self.heading_vec[:] = compute_humanoid_observations(
-            self.obs_buf, self.root_states, self.targets, self.potentials,
+            self.obs_buf, self.root_states[self.humanoid_actor_idxs, :], self.targets, self.potentials,
             self.inv_start_rot, self.dof_pos, self.dof_vel, self.dof_force_tensor,
             self.dof_limits_lower, self.dof_limits_upper, self.dof_vel_scale,
             self.vec_sensor_tensor, self.actions, self.dt, self.contact_force_scale, self.angular_velocity_scale,
-            self.basis_vec0, self.basis_vec1)
+            self.basis_vec0, self.basis_vec1, 
+            self.root_states[self.ball_actor_idxs, :], self.ball_targets)
+        
 
     def reset_idx(self, env_ids):
         # Randomization can happen only at reset time, since it can reset actor positions on GPU
         if self.randomize:
             self.apply_randomizations(self.randomization_params)
+
 
         positions = torch_rand_float(-0.2, 0.2, (len(env_ids), self.num_dof), device=self.device)
         velocities = torch_rand_float(-0.1, 0.1, (len(env_ids), self.num_dof), device=self.device)
@@ -283,17 +315,27 @@ class HumanoidIRL(VecTask):
         self.dof_pos[env_ids] = tensor_clamp(self.initial_dof_pos[env_ids] + positions, self.dof_limits_lower, self.dof_limits_upper)
         self.dof_vel[env_ids] = velocities
 
-        env_ids_int32 = env_ids.to(dtype=torch.int32)
-        self.gym.set_actor_root_state_tensor_indexed(self.sim,
-                                                     gymtorch.unwrap_tensor(self.initial_root_states),
-                                                     gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+        actor_ids = []
+        for i in range(env_ids.shape[0]):
+            actor_ids.append(2*env_ids[i]) # bot
+            actor_ids.append(2*env_ids[i]+1) # ball
+        actor_ids = torch.tensor(actor_ids)
+        actor_ids_int32 = actor_ids.to(dtype=torch.int32).to(self.device)
 
-        self.gym.set_dof_state_tensor_indexed(self.sim,
-                                              gymtorch.unwrap_tensor(self.dof_state),
-                                              gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+        humanoid_ids = (env_ids*2).clone()
+        humanoid_ids_int32 = humanoid_ids.to(dtype=torch.int32).to(self.device)
+        
+        ball_ids = (env_ids*2 + 1).clone()
+        ball_ids_int32 = ball_ids.to(dtype=torch.int32).to(self.device)
 
+        env_ids_int32 = env_ids.to(dtype=torch.int32).to(self.device)
+        # self.gym.set_actor_root_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.initial_root_states), gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+        # self.gym.set_dof_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.dof_state), gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+        self.gym.set_actor_root_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.initial_root_states), gymtorch.unwrap_tensor(actor_ids_int32), len(actor_ids_int32))
+        self.gym.set_dof_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.dof_state), gymtorch.unwrap_tensor(humanoid_ids_int32), len(humanoid_ids_int32))
 
-        to_target = self.targets[env_ids] - self.initial_root_states[env_ids, 0:3]
+        # to_target = self.targets[env_ids] - self.initial_root_states[env_ids, 0:3]
+        to_target = self.targets[env_ids] - self.initial_root_states[humanoid_ids, 0:3]
         to_target[:, self.up_axis_idx] = 0
         self.prev_potentials[env_ids] = -torch.norm(to_target, p=2, dim=-1) / self.dt
         self.potentials[env_ids] = self.prev_potentials[env_ids].clone()
@@ -301,11 +343,16 @@ class HumanoidIRL(VecTask):
         self.progress_buf[env_ids] = 0
         self.reset_buf[env_ids] = 0
 
+        self.ball_target_range = 2
+        # self.ball_targets[env_ids] = self.initial_root_states[ball_ids_int32, 0:3] + torch.randn_like(self.initial_root_states[ball_ids_int32, 0:3]).to(self.device)*self.ball_target_range
+        self.ball_targets[env_ids] = self.initial_root_states[ball_ids_int32, 0:3] + torch.ones_like(self.initial_root_states[ball_ids_int32, 0:3]).to(self.device)*self.ball_target_range
+        self.ball_targets[:,2] = 0.1
+
+
+
     def pre_physics_step(self, actions):
         self.actions = actions.to(self.device).clone()
         forces = self.actions * self.motor_efforts.unsqueeze(0) * self.power_scale
-        ball_forces = torch.zeros((self.num_envs)).reshape(self.num_envs, 1).to(self.device)
-        forces = torch.hstack([forces, ball_forces])
         force_tensor = gymtorch.unwrap_tensor(forces)
         self.gym.set_dof_actuation_force_tensor(self.sim, force_tensor)
 
@@ -322,6 +369,7 @@ class HumanoidIRL(VecTask):
 
         # debug viz
         if self.viewer and self.debug_viz:
+        # if self.viewer and True:
             self.gym.clear_lines(self.viewer)
 
             points = []
@@ -340,12 +388,23 @@ class HumanoidIRL(VecTask):
 
             self.gym.add_lines(self.viewer, None, self.num_envs * 2, points, colors)
 
+        # if True:
+        # if False:
+        if self.num_envs==64:
+            self.gym.clear_lines(self.viewer)
+            sphere_geom = gymutil.WireframeSphereGeometry(0.1, 12, 12, None, color=(1, 0, 0))    
+            for i in range(self.num_envs):
+                sphere_pose = gymapi.Vec3(float(self.ball_targets[i,0]), float(self.ball_targets[i,1]), float(self.ball_targets[i,2]))
+                sphere_pose = gymapi.Transform(sphere_pose, r=None)
+                gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[i], sphere_pose) 
+
+
 #####################################################################
 ###=========================jit functions=========================###
 #####################################################################
 
 
-# @torch.jit.script
+@torch.jit.script
 def compute_humanoid_reward(
     obs_buf,
     reset_buf,
@@ -362,9 +421,11 @@ def compute_humanoid_reward(
     motor_efforts,
     termination_height,
     death_cost,
-    max_episode_length
+    max_episode_length, 
+    humanoid_root_states,
+    ball_root_states
 ):
-    # type: (Tensor, Tensor, Tensor, Tensor, float, float, Tensor, Tensor, float, float, float, float, Tensor, float, float, float) -> Tuple[Tensor, Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, float, float, Tensor, Tensor, float, float, float, float, Tensor, float, float, float, Tensor, Tensor) -> Tuple[Tensor, Tensor]
 
     # reward from the direction headed
     heading_weight_tensor = torch.ones_like(obs_buf[:, 11]) * heading_weight
@@ -387,25 +448,53 @@ def compute_humanoid_reward(
     alive_reward = torch.ones_like(potentials) * 2.0
     progress_reward = potentials - prev_potentials
 
-    total_reward = progress_reward + alive_reward + up_reward + heading_reward - \
-        actions_cost_scale * actions_cost - energy_cost_scale * electricity_cost - dof_at_limit_cost
+    # total_reward = progress_reward + alive_reward + up_reward + heading_reward - actions_cost_scale * actions_cost - energy_cost_scale * electricity_cost - dof_at_limit_cost
+    total_reward = progress_reward + alive_reward + up_reward + actions_cost_scale * actions_cost - energy_cost_scale * electricity_cost - dof_at_limit_cost
+    # total_reward = alive_reward + up_reward + actions_cost_scale * actions_cost - energy_cost_scale * electricity_cost - dof_at_limit_cost
 
     # adjust reward for fallen agents
     total_reward = torch.where(obs_buf[:, 0] < termination_height, torch.ones_like(total_reward) * death_cost, total_reward)
 
+    ball_target =  obs_buf[:,111:114]
+    ball_pos =  ball_root_states[:,0:3]
+    ball_vel = ball_root_states[:,3:6]
+
+    humanoid_pos = humanoid_root_states[:,0:3]
+    humanoid_vel = humanoid_root_states[:,3:6]
+
+    ball_target_distance = torch.norm(ball_target - ball_pos, dim=1)
+    humanoid_ball_distance = torch.norm(humanoid_pos-ball_pos, dim=1)
+    humanoid_ball_veocity = torch.norm(humanoid_vel-ball_vel, dim=1)
+
+    ball_target_distance_reward =  -ball_target_distance/5*1
+    humanoid_ball_distance_reward =  -humanoid_ball_distance/5*2
+    humanoid_ball_veocity_reward =  -humanoid_ball_veocity/2 
+
+    # print(total_reward.mean())
+    # print(ball_target_distance_reward.mean())
+    # print(humanoid_ball_distance_reward.mean())
+    # print(humanoid_ball_veocity_reward.mean())
+    # print('=====')
+
+    total_reward += ball_target_distance_reward
+    total_reward += humanoid_ball_distance_reward
+    # total_reward += humanoid_ball_veocity_reward
+
+
     # reset agents
     reset = torch.where(obs_buf[:, 0] < termination_height, torch.ones_like(reset_buf), reset_buf)
     reset = torch.where(progress_buf >= max_episode_length - 1, torch.ones_like(reset_buf), reset)
+    reset = torch.where(ball_target_distance <= 0.5, torch.ones_like(reset_buf), reset)
 
     return total_reward, reset
 
 
-# @torch.jit.script
+@torch.jit.script
 def compute_humanoid_observations(obs_buf, root_states, targets, potentials, inv_start_rot, dof_pos, dof_vel,
                                   dof_force, dof_limits_lower, dof_limits_upper, dof_vel_scale,
                                   sensor_force_torques, actions, dt, contact_force_scale, angular_velocity_scale,
-                                  basis_vec0, basis_vec1):
-    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, float, Tensor, Tensor, float, float, float, Tensor, Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]
+                                  basis_vec0, basis_vec1, ball_states, ball_target):
+    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, float, Tensor, Tensor, float, float, float, Tensor, Tensor, Tensor, Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]
 
     torso_position = root_states[:, 0:3]
     torso_rotation = root_states[:, 3:7]
@@ -429,11 +518,18 @@ def compute_humanoid_observations(obs_buf, root_states, targets, potentials, inv
     angle_to_target = normalize_angle(angle_to_target).unsqueeze(-1)
     dof_pos_scaled = unscale(dof_pos, dof_limits_lower, dof_limits_upper)
 
+    ball_position = ball_states[:, 0:3]
+    ball_rotation = ball_states[:, 3:7]
+    ball_velocity = ball_states[:, 7:10]
+    ball_ang_velocity = ball_states[:, 10:13]
 
-    # obs_buf shapes: 1, 3, 3, 1, 1, 1, 1, 1, num_dofs (21), num_dofs (21), 6, num_acts (21)
+    ball_position_local = ball_position - torso_position
+    ball_target_local = ball_target - torso_position
+
+    # obs_buf shapes: 1, 3, 3, 1, 1, 1, 1, 1, num_dofs (21), num_dofs (21), 6, num_acts (21), 3 ball_pos
     obs = torch.cat((torso_position[:, 2].view(-1, 1), vel_loc, angvel_loc * angular_velocity_scale,
                      yaw, roll, angle_to_target, up_proj.unsqueeze(-1), heading_proj.unsqueeze(-1),
-                     dof_pos_scaled[:,:-1], dof_vel[:,:-1] * dof_vel_scale, dof_force[:,:-1] * contact_force_scale,
-                     sensor_force_torques.view(-1, 12) * contact_force_scale, actions), dim=-1)
+                     dof_pos_scaled, dof_vel * dof_vel_scale, dof_force * contact_force_scale,
+                     sensor_force_torques.view(-1, 12) * contact_force_scale, actions, ball_position_local, ball_target_local), dim=-1)
 
     return obs, potentials, prev_potentials_new, up_vec, heading_vec

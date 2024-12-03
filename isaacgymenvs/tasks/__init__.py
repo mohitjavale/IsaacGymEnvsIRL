@@ -57,8 +57,6 @@ from .industreal.industreal_task_pegs_insert import IndustRealTaskPegsInsert
 from .industreal.industreal_task_gears_insert import IndustRealTaskGearsInsert
 
 from .humanoid_irl import HumanoidIRL
-from .humanoid_irl2 import HumanoidIRL2
-
 
 
 def resolve_allegro_kuka(cfg, *args, **kwargs):
@@ -115,7 +113,5 @@ isaacgym_task_map = {
     "Quadcopter": Quadcopter,
     "ShadowHand": ShadowHand,
     "Trifinger": Trifinger,
-
     "HumanoidIRL": HumanoidIRL,
-    "HumanoidIRL2": HumanoidIRL2,
 }
