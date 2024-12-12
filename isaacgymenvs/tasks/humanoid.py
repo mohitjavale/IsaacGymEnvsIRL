@@ -115,6 +115,9 @@ class Humanoid(VecTask):
         self.dt = self.cfg["sim"]["dt"]
         self.potentials = to_torch([-1000./self.dt], device=self.device).repeat(self.num_envs)
         self.prev_potentials = self.potentials.clone()
+        
+        # self.test_time = 0
+        # self.i = 0
 
     def create_sim(self):
         self.up_axis_idx = 2 # index of up axis: Y=1, Z=2
@@ -217,6 +220,9 @@ class Humanoid(VecTask):
         self.extremities = to_torch([5, 8], device=self.device, dtype=torch.long)
 
     def compute_reward(self, actions):
+        # import time
+        # s1 = time.time()
+
         self.rew_buf[:], self.reset_buf = compute_humanoid_reward(
             self.obs_buf,
             self.reset_buf,
@@ -235,6 +241,10 @@ class Humanoid(VecTask):
             self.death_cost,
             self.max_episode_length
         )
+        # self.i += 1
+        # self.test_time = (self.test_time*(self.i-1) + time.time()-s1)/self.i
+        # print(self.i, self.test_time)
+
 
     def compute_observations(self):
         self.gym.refresh_dof_state_tensor(self.sim)
@@ -261,7 +271,6 @@ class Humanoid(VecTask):
         self.dof_pos[env_ids] = tensor_clamp(self.initial_dof_pos[env_ids] + positions, self.dof_limits_lower, self.dof_limits_upper)
         self.dof_vel[env_ids] = velocities
 
-        import ipdb; ipdb.set_trace()
         
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
@@ -322,7 +331,7 @@ class Humanoid(VecTask):
 #####################################################################
 
 
-@torch.jit.script
+# @torch.jit.script
 def compute_humanoid_reward(
     obs_buf,
     reset_buf,
@@ -364,8 +373,17 @@ def compute_humanoid_reward(
     alive_reward = torch.ones_like(potentials) * 2.0
     progress_reward = potentials - prev_potentials
 
-    total_reward = progress_reward + alive_reward + up_reward + heading_reward - \
-        actions_cost_scale * actions_cost - energy_cost_scale * electricity_cost - dof_at_limit_cost
+    total_reward = progress_reward + alive_reward + up_reward + heading_reward - actions_cost_scale * actions_cost - energy_cost_scale * electricity_cost - dof_at_limit_cost
+
+    # print('=====')
+    # print(f'{total_reward.mean()=}')
+    # print(f'{progress_reward.mean()=}')
+    # print(f'{alive_reward.mean()=}')
+    # print(f'{up_reward.mean()=}')
+    # print(f'{heading_reward.mean()=}')
+    # print(f'{(-actions_cost_scale*actions_cost).mean()=}')
+    # print(f'{(-energy_cost_scale * electricity_cost).mean()=}')
+    # print(f'{-dof_at_limit_cost.mean()=}')
 
     # adjust reward for fallen agents
     total_reward = torch.where(obs_buf[:, 0] < termination_height, torch.ones_like(total_reward) * death_cost, total_reward)
@@ -377,7 +395,7 @@ def compute_humanoid_reward(
     return total_reward, reset
 
 
-@torch.jit.script
+# @torch.jit.script
 def compute_humanoid_observations(obs_buf, root_states, targets, potentials, inv_start_rot, dof_pos, dof_vel,
                                   dof_force, dof_limits_lower, dof_limits_upper, dof_vel_scale,
                                   sensor_force_torques, actions, dt, contact_force_scale, angular_velocity_scale,
