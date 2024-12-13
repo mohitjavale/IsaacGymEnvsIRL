@@ -39,6 +39,8 @@ from isaacgymenvs.utils.torch_jit_utils import scale, unscale, quat_mul, quat_co
 from isaacgymenvs.tasks.base.vec_task import VecTask
 
 from isaacgymenvs.tasks.RND import RND
+from isaacgymenvs.tasks.icm import ICM
+
 import wandb
 
 
@@ -80,8 +82,6 @@ class HumanoidIRL(VecTask):
         else:
             wandb.init(project="irl_project", name='r23')
             # wandb.init(project="irl_project", name='test', mode='disabled')
-
-
 
         if self.viewer != None:
             cam_pos = gymapi.Vec3(50.0, 25.0, 2.4)
@@ -133,11 +133,29 @@ class HumanoidIRL(VecTask):
         self.ball_targets = to_torch([1000, 0, 0], device=self.device).repeat((self.num_envs, 1))
 
         # rnd
-        self.use_rnd = True
-        if self.use_rnd == True:
+        self.use_rnd = False
+        if self.use_rnd:
             # self.rnd = RND([self.cfg["env"]["numObservations"], 128, 128, self.cfg["env"]["numObservations"]], self.device, optimzer_lr=1e-5)
             self.rnd = RND([2, 64, 2], self.device, optimzer_lr=1e-4)
             # self.rnd = RND([self.cfg["env"]["numObservations"], 64, self.cfg["env"]["numObservations"]], self.device, optimzer_lr=1e-4)
+
+        self.use_icm = True
+        self.intrinsic_reward_scale = 5000
+        self.icm = None
+        self.icm_optimizer = None
+        self.last_obs_for_icm = None
+        self.icm_loss_reset_coeff = torch.zeros(self.num_envs, device=self.device)
+        assert not self.use_rnd or not self.use_icm, "Only one of RND or ICM can be used at a time"
+        if self.use_icm:
+            obs_dim = self.cfg["env"]["numObservations"]
+            action_dim = self.cfg["env"]["numActions"]
+
+            self.icm = ICM(
+                input_dim=obs_dim,
+                action_dim=action_dim,
+                device=self.device
+            )
+            self.icm_optimizer = torch.optim.Adam(self.icm.parameters(), lr=1e-4)
 
         self.i = 0
 
@@ -371,6 +389,8 @@ class HumanoidIRL(VecTask):
         self.ball_targets[env_ids] = self.initial_root_states[ball_ids_int32, 0:3] + torch.ones_like(self.initial_root_states[ball_ids_int32, 0:3]).to(self.device)*self.ball_target_range
         self.ball_targets[:,2] = 0.1
 
+        self.icm_loss_reset_coeff[env_ids] = 0.0
+
 
 
     def pre_physics_step(self, actions):
@@ -524,21 +544,47 @@ class HumanoidIRL(VecTask):
         # total_reward += humanoid_ball_distance_reward
         # total_reward += humanoid_ball_veocity_reward
 
-        rnd_reward = self.rnd.compute_reward(ball_pos_local[:,:2])/1
-        # rnd_reward = self.rnd.compute_reward(ball_target[:,0:2] - ball_pos[:,0:2])/1
-        # rnd_reward = self.rnd.compute_reward(obs_buf)/10
-        for _ in range(10):
-            # pass
-            self.rnd.update(ball_pos_local[:,:2])
-            # self.rnd.update(ball_target[:,0:2] - ball_pos[:,0:2])
-            # self.rnd.update(obs_buf)
         if self.use_rnd:
-            total_reward += rnd_reward
+            rnd_reward = self.rnd.compute_reward(ball_pos_local[:,:2])/1
+            # rnd_reward = self.rnd.compute_reward(ball_target[:,0:2] - ball_pos[:,0:2])/1
+            # rnd_reward = self.rnd.compute_reward(obs_buf)/10
+            for _ in range(10):
+                # pass
+                self.rnd.update(ball_pos_local[:,:2])
+                # self.rnd.update(ball_target[:,0:2] - ball_pos[:,0:2])
+                # self.rnd.update(obs_buf)
+            if self.use_rnd:
+                total_reward += rnd_reward
+
+        if self.use_icm:
+            assert self.last_obs_for_icm is not None
+            with torch.enable_grad():
+                intrinsic_reward, loss = self.icm.compute_intrinsic_reward(
+                    self.last_obs_for_icm, obs_buf, actions
+                )
+
+                intrinsic_reward *= self.icm_loss_reset_coeff
+                loss *= self.icm_loss_reset_coeff
+
+                # Accumulate gradients and update periodically
+                self.icm_optimizer.zero_grad()
+                loss.mean().backward()
+                self.icm_optimizer.step()
+
+            self.last_obs_for_icm = obs_buf.detach().clone()
+
+            intrinsic_reward = intrinsic_reward.detach() * self.intrinsic_reward_scale
+
+            if DEBUG_PRINT:
+                print('--')
+                print(f'{intrinsic_reward.mean()}')
+
+            total_reward += intrinsic_reward
+
 
         if DEBUG_PRINT:
             print('--')
             print(f'{rnd_reward.mean()=}')
-        print(f'{rnd_reward.mean()=}')
 
         # Sparse massive reward
         # total_reward = torch.where(ball_target_distance <= 0.5, torch.ones_like(total_reward)*100, total_reward)
@@ -562,9 +608,12 @@ class HumanoidIRL(VecTask):
                 "humanoid_ball_distance_reward.mean()=": humanoid_ball_distance_reward.mean(),
                 "humanoid_ball_veocity_reward.mean()=": humanoid_ball_veocity_reward.mean(),
 
-                "rnd_reward.mean()=": rnd_reward.mean(),
                 "sparse_massive_reward.mean()=": sparse_massive_reward.mean(),
                 }
+            if self.use_rnd:
+                log_dict["rnd_reward.mean()="] = rnd_reward.mean()
+            if self.use_icm:
+                log_dict["icm_reward.mean()="] = intrinsic_reward.mean()
             wandb.log(data=log_dict, step=int(self.i/32))
 
 
@@ -572,6 +621,10 @@ class HumanoidIRL(VecTask):
         reset = torch.where(obs_buf[:, 0] < termination_height, torch.ones_like(reset_buf), reset_buf)
         reset = torch.where(progress_buf >= max_episode_length - 1, torch.ones_like(reset_buf), reset)
         reset = torch.where(ball_target_distance <= 0.5, torch.ones_like(reset_buf), reset)
+
+        # ICM should be calculable after this for all envs - in reset_idx() we can turn off any that are
+        # being reset.
+        self.icm_loss_reset_coeff[:] = 1.0
 
         return total_reward, reset
 
@@ -618,5 +671,8 @@ class HumanoidIRL(VecTask):
                         yaw, roll, angle_to_target, up_proj.unsqueeze(-1), heading_proj.unsqueeze(-1),
                         dof_pos_scaled, dof_vel * dof_vel_scale, dof_force * contact_force_scale,
                         sensor_force_torques.view(-1, 12) * contact_force_scale, actions, ball_position_local, ball_target_local), dim=-1)
+
+        if self.last_obs_for_icm is None:
+            self.last_obs_for_icm = obs.detach().clone()
 
         return obs, potentials, prev_potentials_new, up_vec, heading_vec
