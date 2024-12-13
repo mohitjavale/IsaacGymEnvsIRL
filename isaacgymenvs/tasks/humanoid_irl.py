@@ -277,8 +277,8 @@ class HumanoidIRL(VecTask):
             self.ball_handles.append(ball_handle)
             self.ball_actor_idxs.append(self.gym.get_actor_index(env_ptr, ball_handle, gymapi.DOMAIN_SIM))
 
-        self.humanoid_actor_idxs = torch.Tensor(self.humanoid_actor_idxs).to(device=self.device,dtype=torch.int32)
-        self.ball_actor_idxs = torch.Tensor(self.ball_actor_idxs).to(device=self.device,dtype=torch.int32)
+        self.humanoid_actor_idxs = torch.Tensor(self.humanoid_actor_idxs).to(device=self.device,dtype=torch.long)
+        self.ball_actor_idxs = torch.Tensor(self.ball_actor_idxs).to(device=self.device,dtype=torch.long)
 
 
         dof_prop = self.gym.get_actor_dof_properties(env_ptr, handle)
@@ -368,7 +368,7 @@ class HumanoidIRL(VecTask):
         humanoid_ids_int32 = humanoid_ids.to(dtype=torch.int32).to(self.device)
         
         ball_ids = (env_ids*2 + 1).clone()
-        ball_ids_int32 = ball_ids.to(dtype=torch.int32).to(self.device)
+        ball_ids_int32 = ball_ids.to(dtype=torch.long).to(self.device)
 
         env_ids_int32 = env_ids.to(dtype=torch.int32).to(self.device)
         # self.gym.set_actor_root_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.initial_root_states), gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
@@ -501,17 +501,17 @@ class HumanoidIRL(VecTask):
         # total_reward = progress_reward + alive_reward + up_reward + actions_cost_scale * actions_cost - energy_cost_scale * electricity_cost - dof_at_limit_cost
         # total_reward = alive_reward + up_reward + actions_cost_scale * actions_cost - energy_cost_scale * electricity_cost - dof_at_limit_cost
 
-        DEBUG_PRINT = False
-        if DEBUG_PRINT:
-            print('=====')
-            print(f'{total_reward.mean()=}')
-            print(f'{progress_reward.mean()=}')
-            print(f'{alive_reward.mean()=}')
-            print(f'{up_reward.mean()=}')
-            print(f'{heading_reward.mean()=}')
-            print(f'{(-actions_cost_scale*actions_cost).mean()=}')
-            print(f'{(-energy_cost_scale * electricity_cost).mean()=}')
-            print(f'{-dof_at_limit_cost.mean()=}')
+        # DEBUG_PRINT = False
+        # if DEBUG_PRINT:
+        #     print('=====')
+        #     print(f'{total_reward.mean()=}')
+        #     print(f'{progress_reward.mean()=}')
+        #     print(f'{alive_reward.mean()=}')
+        #     print(f'{up_reward.mean()=}')
+        #     print(f'{heading_reward.mean()=}')
+        #     print(f'{(-actions_cost_scale*actions_cost).mean()=}')
+        #     print(f'{(-energy_cost_scale * electricity_cost).mean()=}')
+        #     print(f'{-dof_at_limit_cost.mean()=}')
 
 
         
@@ -535,11 +535,11 @@ class HumanoidIRL(VecTask):
         humanoid_ball_distance_reward =  -humanoid_ball_distance/5*2
         humanoid_ball_veocity_reward =  -humanoid_ball_veocity/2 
 
-        if DEBUG_PRINT:
-            print('--')
-            print(f'{ball_target_distance_reward.mean()=}')
-            print(f'{humanoid_ball_distance_reward.mean()=}')
-            print(f'{humanoid_ball_veocity_reward.mean()=}')
+        # if DEBUG_PRINT:
+        #     print('--')
+        #     print(f'{ball_target_distance_reward.mean()=}')
+        #     print(f'{humanoid_ball_distance_reward.mean()=}')
+        #     print(f'{humanoid_ball_veocity_reward.mean()=}')
 
         total_reward += ball_target_distance_reward
         # total_reward += humanoid_ball_distance_reward
@@ -574,17 +574,17 @@ class HumanoidIRL(VecTask):
 
             self.last_obs_for_icm = obs_buf.detach().clone()
 
-            if DEBUG_PRINT:
-                print('--')
-                print(f'{intrinsic_reward.mean()}')
+            # if DEBUG_PRINT:
+            #     print('--')
+            #     print(f'{intrinsic_reward.mean()}')
 
             intrinsic_reward_scale = 10 # TODO - we don't seem to use this in lab.
             total_reward += intrinsic_reward_scale * intrinsic_reward.detach()
 
 
-        if DEBUG_PRINT:
-            print('--')
-            print(f'{rnd_reward.mean()=}')
+        # if DEBUG_PRINT:
+        #     print('--')
+        #     print(f'{rnd_reward.mean()=}')
 
         # Sparse massive reward
         # total_reward = torch.where(ball_target_distance <= 0.5, torch.ones_like(total_reward)*100, total_reward)
