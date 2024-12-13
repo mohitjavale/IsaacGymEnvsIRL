@@ -545,16 +545,17 @@ class HumanoidIRL(VecTask):
         # total_reward += humanoid_ball_distance_reward
         # total_reward += humanoid_ball_veocity_reward
 
-        rnd_reward = self.rnd.compute_reward(ball_pos_local[:,:2])/1
-        # rnd_reward = self.rnd.compute_reward(ball_target[:,0:2] - ball_pos[:,0:2])/1
-        # rnd_reward = self.rnd.compute_reward(obs_buf)/10
-        for _ in range(10):
-            # pass
-            self.rnd.update(ball_pos_local[:,:2])
-            # self.rnd.update(ball_target[:,0:2] - ball_pos[:,0:2])
-            # self.rnd.update(obs_buf)
         if self.use_rnd:
-            total_reward += rnd_reward
+            rnd_reward = self.rnd.compute_reward(ball_pos_local[:,:2])/1
+            # rnd_reward = self.rnd.compute_reward(ball_target[:,0:2] - ball_pos[:,0:2])/1
+            # rnd_reward = self.rnd.compute_reward(obs_buf)/10
+            for _ in range(10):
+                # pass
+                self.rnd.update(ball_pos_local[:,:2])
+                # self.rnd.update(ball_target[:,0:2] - ball_pos[:,0:2])
+                # self.rnd.update(obs_buf)
+            if self.use_rnd:
+                total_reward += rnd_reward
 
         if self.use_icm:
             assert self.last_obs_for_icm is not None
@@ -567,24 +568,23 @@ class HumanoidIRL(VecTask):
                 loss *= self.icm_loss_reset_coeff
 
                 # Accumulate gradients and update periodically
-                self.optimizer.zero_grad()
+                self.icm_optimizer.zero_grad()
                 loss.mean().backward()
-                self.optimizer.step()
+                self.icm_optimizer.step()
 
             self.last_obs_for_icm = obs_buf.detach().clone()
 
             if DEBUG_PRINT:
                 print('--')
-                print(f'{intrinsic_reward.mean()=}')
+                print(f'{intrinsic_reward.mean()}')
 
-            intrinsic_reward_scale = 0.1 # TODO - we don't seem to use this.
-            total_reward += intrinsic_reward.detach()
+            intrinsic_reward_scale = 10 # TODO - we don't seem to use this in lab.
+            total_reward += intrinsic_reward_scale * intrinsic_reward.detach()
 
 
         if DEBUG_PRINT:
             print('--')
             print(f'{rnd_reward.mean()=}')
-        print(f'{rnd_reward.mean()=}')
 
         # Sparse massive reward
         # total_reward = torch.where(ball_target_distance <= 0.5, torch.ones_like(total_reward)*100, total_reward)
@@ -608,9 +608,12 @@ class HumanoidIRL(VecTask):
                 "humanoid_ball_distance_reward.mean()=": humanoid_ball_distance_reward.mean(),
                 "humanoid_ball_veocity_reward.mean()=": humanoid_ball_veocity_reward.mean(),
 
-                "rnd_reward.mean()=": rnd_reward.mean(),
                 "sparse_massive_reward.mean()=": sparse_massive_reward.mean(),
                 }
+            if self.use_rnd:
+                log_dict["rnd_reward.mean()="] = rnd_reward.mean()
+            if self.use_icm:
+                log_dict["icm_reward.mean()="] = intrinsic_reward.mean()
             wandb.log(data=log_dict, step=int(self.i/32))
 
 
