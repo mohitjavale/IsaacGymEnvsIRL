@@ -142,6 +142,7 @@ class HumanoidIRL(VecTask):
             # self.rnd = RND([self.cfg["env"]["numObservations"], 64, self.cfg["env"]["numObservations"]], self.device, optimzer_lr=1e-4)
 
         self.use_icm = True
+        self.intrinsic_reward_scale = 5000
         self.icm = None
         self.icm_optimizer = None
         self.last_obs_for_icm = None
@@ -156,7 +157,7 @@ class HumanoidIRL(VecTask):
                 action_dim=action_dim,
                 device=self.device
             )
-            self.icm_optimizer = torch.optim.Adam(self.icm.parameters(), lr=3e-4)
+            self.icm_optimizer = torch.optim.Adam(self.icm.parameters(), lr=1e-4)
 
         self.i = 0
 
@@ -577,9 +578,9 @@ class HumanoidIRL(VecTask):
             # if DEBUG_PRINT:
             #     print('--')
             #     print(f'{intrinsic_reward.mean()}')
+            intrinsic_reward = intrinsic_reward.detach() * self.intrinsic_reward_scale
 
-            intrinsic_reward_scale = 10 # TODO - we don't seem to use this in lab.
-            total_reward += intrinsic_reward_scale * intrinsic_reward.detach()
+            total_reward += intrinsic_reward.detach()
 
 
         # if DEBUG_PRINT:
